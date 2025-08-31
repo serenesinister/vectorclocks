@@ -39,6 +39,14 @@ typedef struct Fila {
     pthread_cond_t cond;
 } Fila;
 
+typedef struct Contexto {
+    int pid;
+    Clock clock;
+    Fila filaEntrada;
+    Fila filaSaida;
+    volatile int running;
+} Contexto;
+
 void initFila(Fila *fila) {
     fila->inicio = fila->fim = fila->tamanho = 0;
     pthread_mutex_init(&fila->mutex, NULL);
@@ -93,30 +101,30 @@ void printClock(int pid, Clock *clock, char label, TipoEvento tipo, char secondL
     fflush(stdout);
 }
 
-typedef struct Contexto {
-    int pid;
-    Clock clock;
-    Fila filaEntrada;
-    Fila filaSaida;
-    volatile int running;
-} Contexto;
-
 void* threadEntrada(void* arg) {
     Contexto *ctx = (Contexto*) arg;
     while (ctx->running) {
+        int flag = 0;
         MPI_Status status;
-        int msg[NUM_PROC];
-        int ret = MPI_Recv(msg, NUM_PROC, MPI_INT, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
-        if (!ctx->running || ret != MPI_SUCCESS) break;
 
-        Evento ev;
-        ev.tipo = RECEBIMENTO;
-        ev.destino_ou_origem = status.MPI_SOURCE;
-        ev.label = '?';
-        ev.outroLabel = '?';
-        memcpy(&ev.label, msg, sizeof(int) * NUM_PROC);  // hack para carregar clock
+        // Verifica se há mensagem disponível
+        MPI_Iprobe(MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &flag, &status);
+        if (flag) {
+            int msg[NUM_PROC];
+            MPI_Recv(msg, NUM_PROC, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD, &status);
 
-        pushFila(&ctx->filaEntrada, ev);
+            Evento ev;
+            ev.tipo = RECEBIMENTO;
+            ev.destino_ou_origem = status.MPI_SOURCE;
+            ev.label = '?';
+            ev.outroLabel = '?';
+            memcpy(&ev.label, msg, sizeof(int) * NUM_PROC);
+
+            pushFila(&ctx->filaEntrada, ev);
+        } else {
+            // Não há mensagem, dá uma pausa curta para evitar busy waiting
+            usleep(1000);
+        }
     }
     return NULL;
 }
@@ -215,13 +223,13 @@ int main() {
 
     pthread_join(tRelogio, NULL);
 
-    // Finaliza outras threads
     ctx.running = 0;
+
     pthread_cond_broadcast(&ctx.filaEntrada.cond);
     pthread_cond_broadcast(&ctx.filaSaida.cond);
 
-    pthread_cancel(tEntrada);
-    pthread_cancel(tSaida);
+    pthread_join(tEntrada, NULL);
+    pthread_join(tSaida, NULL);
 
     MPI_Finalize();
     return 0;
